@@ -1,10 +1,25 @@
 # Gifsky
 
-Turn a video — or a sequence of images — into a GIF, right in your browser. Drop in a
+Turn a video into a GIF, right in your browser. Drop in a
 clip, trim it on a timeline, preview the loop, and export.
 It's an installable PWA that works offline.
 
 Nothing is ever uploaded: every frame is sampled and encoded **on your device**.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="public/screenshots/start.png" alt="Gifsky landing screen with an Open Video button" width="320"><br>
+      <sub>Drop or pick a clip — everything stays on your device.</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="public/screenshots/editor.png" alt="The editor: loop preview, trim timeline, and quality settings" width="320"><br>
+      <sub>Trim on the timeline, preview the loop, and tune quality or target size.</sub>
+    </td>
+  </tr>
+</table>
 
 ## The name
 
