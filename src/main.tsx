@@ -368,7 +368,11 @@ function PreviewStage() {
 			el.removeEventListener("timeupdate", onTime);
 			el.removeEventListener("ended", onEnded);
 		};
-	}, [src?.url]);
+		// `showResult` matters, not just the clip: while the GIF result is shown the
+		// <video> is unmounted (replaced by the <img>). Going back to edit remounts a
+		// fresh, source-less <video>; without re-running on that transition its `src`
+		// would never be set and the preview would stay blank.
+	}, [src?.url, showResult]);
 
 	// Drive play/pause from the `playing` signal so the loop auto-starts on load
 	// and stays in sync with the toggle.
