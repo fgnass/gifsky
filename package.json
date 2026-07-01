@@ -1,0 +1,34 @@
+{
+  "name": "gifsky",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "format": "prettier --write src",
+    "format:check": "prettier --check src",
+    "screenshot": "node scripts/screenshot.mjs"
+  },
+  "dependencies": {
+    "@preact/signals": "^2.9.2",
+    "classname-variants": "^1.7.1",
+    "gifski-wasm": "^2.2.0",
+    "lucide-preact": "^1.22.0",
+    "preact": "^10.27.2",
+    "tailwind-merge": "^3.4.0"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.5",
+    "@tailwindcss/vite": "^4.1.16",
+    "prettier": "^3.9.4",
+    "prettier-plugin-tailwindcss": "^0.8.0",
+    "tailwindcss": "^4.1.16",
+    "playwright": "^1.61.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.1.0",
+    "vite-plugin-pwa": "^1.2.0"
+  }
+}
