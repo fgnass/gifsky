@@ -11,13 +11,18 @@ self.onmessage = async (event: MessageEvent<EncoderRequest>) => {
 	}
 
 	try {
+		// gifski's repeat: -1 = loop forever, 0 = play once (no loop extension), n =
+		// n finite loops. Our app model — and the UI's "∞" chip — uses 0 for "loop
+		// forever", so translate here at the boundary. Passing 0 straight through is
+		// why an "∞" GIF played only once.
+		const repeat = event.data.repeat === 0 ? -1 : event.data.repeat;
 		const gif = await encode({
 			frames: event.data.frames,
 			width: event.data.width,
 			height: event.data.height,
 			fps: event.data.fps,
 			quality: event.data.quality,
-			repeat: event.data.repeat,
+			repeat,
 		});
 
 		const buffer = gif.slice().buffer as ArrayBuffer;
