@@ -26,6 +26,17 @@ import { encodeGif } from "./encoder";
 import { prepareFrames, sampleImageBurst, sampleVideoBurst } from "./frames";
 import type { EncodeSettings } from "./types";
 
+// The quality binary-search fires several probe encodes back-to-back with nothing
+// visible to advance the progress bar. Rotate the status line through these so each
+// probe reads as forward motion instead of a frozen "Balancing quality and size…".
+const BALANCE_MESSAGES = [
+	"Balancing quality and size…",
+	"Trying a sharper look…",
+	"Testing a leaner encode…",
+	"Homing in on the sweet spot…",
+	"Squeezing out the last bytes…",
+];
+
 /** Full-quality sample + encode at the given settings; returns the GIF bytes. */
 export async function encodeWith(s: EncodeSettings): Promise<ArrayBuffer> {
 	const source = video.value ? [video.value.file] : imageFiles.value;
@@ -220,9 +231,10 @@ async function searchForTarget(
 		let hi = 100;
 		let bestQuality = QUALITY_FLOOR;
 		let bestBytes = floorBytes;
+		let step = 0;
 		while (lo <= hi) {
 			const mid = Math.floor((lo + hi) / 2);
-			onStep("Balancing quality and size…");
+			onStep(BALANCE_MESSAGES[step++ % BALANCE_MESSAGES.length]);
 			const res = await probeRateFor({ ...base, maxSize: rung, quality: mid });
 			const bytes = res ? project(res.rate, res.kind) : Infinity;
 			if (bytes <= target) {
