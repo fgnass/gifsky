@@ -125,6 +125,19 @@ function scrubPreview(time: number) {
 	step();
 }
 
+// While the loop is playing and the user drags a trim edge past the playhead,
+// snap playback back to the selection start so it never gets stranded outside the
+// (just-resized) range. Mirrors the loop-correction thresholds in onTime.
+function clampPlayheadToSelection() {
+	const el = previewEl;
+	if (!el) return;
+	const { start, end } = trim.peek();
+	if (el.currentTime >= end - 0.02 || el.currentTime < start - 0.05) {
+		el.currentTime = start;
+		playhead.value = start;
+	}
+}
+
 const prefersReducedMotion = () =>
 	typeof matchMedia !== "undefined" &&
 	matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -485,12 +498,14 @@ function TrimBar() {
 		} catch {
 			// capture is a nicety
 		}
-		if (playing.peek()) playing.value = false;
+		// Keep playing while trimming so the user can watch the loop update live;
+		// only scrub to the grabbed frame when paused.
+		const wasPlaying = playing.peek();
 
 		const grabX = event.clientX;
 		const grabTime = edge === "start" ? trim.peek().start : trim.peek().end;
 		activeEdge.value = edge;
-		scrubPreview(grabTime);
+		if (!wasPlaying) scrubPreview(grabTime);
 
 		const move = (moveEvent: PointerEvent) => {
 			const cur = view.peek();
@@ -507,7 +522,8 @@ function TrimBar() {
 					: clamp(target, t.start + min, duration);
 			trim.value =
 				edge === "start" ? { ...t, start: edgeTime } : { ...t, end: edgeTime };
-			scrubPreview(edgeTime);
+			if (wasPlaying) clampPlayheadToSelection();
+			else scrubPreview(edgeTime);
 
 			// When zoomed in, grow the window outward so the handle stays visible.
 			if (curLen < duration - 0.01) {
@@ -552,7 +568,10 @@ function TrimBar() {
 		} catch {
 			// ignore
 		}
-		if (playing.peek()) playing.value = false;
+		// Moving the whole selection keeps the loop playing (watch it update live);
+		// a bare scrub on the track is a manual seek, so it pauses.
+		const wasPlaying = playing.peek();
+		if (mode === "scrub" && wasPlaying) playing.value = false;
 
 		const len = trim.peek().end - trim.peek().start;
 		let pointerX = event.clientX;
@@ -574,7 +593,8 @@ function TrimBar() {
 			if (mode === "move") {
 				const ns = clamp(pointerTime(cur) - grabOffset, 0, duration - len);
 				trim.value = { start: ns, end: ns + len };
-				scrubPreview(ns);
+				if (wasPlaying) clampPlayheadToSelection();
+				else scrubPreview(ns);
 			} else {
 				scrubPreview(pointerTime(cur));
 			}
@@ -703,6 +723,9 @@ function TrimBar() {
 					    to the track shape, while the handles and grip below sit on top and
 					    may overhang the edges without being cut off. */}
 					<div class="pointer-events-none absolute inset-0 overflow-hidden rounded-[14px]">
+						{filmstrip.value.length === 0 ? (
+							<div class="barberpole absolute inset-0" />
+						) : null}
 						{filmstrip.value.map((url, index) => {
 							const t0 = sr.start + (index / thumbCount) * stripSpan;
 							const t1 = sr.start + ((index + 1) / thumbCount) * stripSpan;
