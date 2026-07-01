@@ -38,6 +38,7 @@ import { encodeToTarget, encodeWith, probeRateFor } from "./lib/target-size";
 import type { EncodeSettings, Trim } from "./lib/types";
 import type { CancelToken } from "./lib/video";
 import { extractFilmstrip, loadVideoInfo, releaseFilmstrip } from "./lib/video";
+import { keepAwake } from "./lib/wake-lock";
 import {
 	activeEdge,
 	type BeforeInstallPromptEvent,
@@ -1454,6 +1455,7 @@ async function runEncode() {
 	const source = video.value ? [video.value.file] : imageFiles.value;
 	if (source.length === 0) return;
 
+	const releaseWakeLock = keepAwake();
 	try {
 		previewEl?.pause();
 		playing.value = false;
@@ -1475,6 +1477,8 @@ async function runEncode() {
 		stage.value = "error";
 		errorText.value =
 			error instanceof Error ? error.message : "Encoding failed.";
+	} finally {
+		releaseWakeLock();
 	}
 }
 

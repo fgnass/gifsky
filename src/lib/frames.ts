@@ -333,12 +333,25 @@ function waitForVideoMetadata(video: HTMLVideoElement) {
 	});
 }
 
+// Longest we'll wait for a single `seeked` event before giving up. Generous, so
+// slow decodes don't trip it — its real job is to surface a seek that never
+// resumes (e.g. after the tab was suspended by a phone sleeping) as an error
+// instead of an eternal "Preparing frames…" spinner. Background timers are
+// throttled, so this only counts down while the page is actually active.
+const SEEK_TIMEOUT_MS = 30_000;
+
 function seek(video: HTMLVideoElement, time: number) {
 	return new Promise<void>((resolve, reject) => {
 		const onSeeked = () => cleanup(resolve);
 		const onError = () =>
 			cleanup(() => reject(new Error("The video frame could not be read.")));
+		const onTimeout = () =>
+			cleanup(() =>
+				reject(new Error("Reading the video timed out — please try again.")),
+			);
+		const timer = setTimeout(onTimeout, SEEK_TIMEOUT_MS);
 		const cleanup = (done: () => void) => {
+			clearTimeout(timer);
 			video.removeEventListener("seeked", onSeeked);
 			video.removeEventListener("error", onError);
 			done();
