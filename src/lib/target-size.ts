@@ -126,7 +126,12 @@ export async function encodeToTarget(cap: number): Promise<ArrayBuffer> {
 
 	// 3 — resolution pinned at the source ceiling with room to spare: spend the
 	// leftover budget climbing gifski quality (never fps, never a lower quality).
-	while (budget > 0 && res >= ceiling && chosen.quality < 100 && gif.byteLength < aim) {
+	while (
+		budget > 0 &&
+		res >= ceiling &&
+		chosen.quality < 100 &&
+		gif.byteLength < aim
+	) {
 		const q = Math.min(100, chosen.quality + 5);
 		const trial: EncodeSettings = { ...chosen, quality: q };
 		settings.value = trial;
