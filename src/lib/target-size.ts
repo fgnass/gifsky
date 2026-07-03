@@ -2,15 +2,17 @@
 // the app's heaviest logic; it lives apart from the view and drives the shared
 // signals in ../state for progress + status.
 import {
-	MAXSIZE_LADDER,
+	EFFORT_STEPS,
 	PASS2_SAFETY,
 	PROBE_IMAGE_FRAMES,
 	PROBE_SECONDS,
 	QUALITY_FLOOR,
-	TARGET_MIN_RES_FRACTION,
+	TARGET_FPS,
+	TARGET_MAX_RES,
+	TARGET_MIN_RES,
+	TARGET_QUALITY,
 	TARGET_SAFETY,
-	TARGET_TUNE_QUALITY,
-	TARGET_TUNE_STEPS,
+	effort,
 	imageFiles,
 	prepared,
 	progress,
@@ -23,19 +25,9 @@ import {
 	video,
 } from "../state";
 import { encodeGif } from "./encoder";
+import { clamp } from "./format";
 import { prepareFrames, sampleImageBurst, sampleVideoBurst } from "./frames";
 import type { EncodeSettings } from "./types";
-
-// The quality binary-search fires several probe encodes back-to-back with nothing
-// visible to advance the progress bar. Rotate the status line through these so each
-// probe reads as forward motion instead of a frozen "Balancing quality and size…".
-const BALANCE_MESSAGES = [
-	"Balancing quality and size…",
-	"Trying a sharper look…",
-	"Testing a leaner encode…",
-	"Homing in on the sweet spot…",
-	"Squeezing out the last bytes…",
-];
 
 /** Full-quality sample + encode at the given settings; returns the GIF bytes. */
 export async function encodeWith(s: EncodeSettings): Promise<ArrayBuffer> {
@@ -72,111 +64,95 @@ export async function encodeWith(s: EncodeSettings): Promise<ArrayBuffer> {
 }
 
 /**
- * Resolution-first target-size mode. Two passes keep it both safe and tight:
+ * Resolution-first target-size mode. fps and quality are held high and fixed
+ * (TARGET_FPS / TARGET_QUALITY); the one knob that moves is resolution, since GIF
+ * size scales ~with resolution². The flow:
  *
- *  1. Search probes (conservatively, aiming under the cap) for the best
- *     (maxSize, quality), then do the real encode to confirm.
- *  2. Calibrate the probe model from that real encode's measured error and
- *     re-tune against the true cap, so we don't leave quality on the table
- *     (probe under-predicted) or overshoot (probe over-predicted). We only
- *     re-encode if the calibrated pick actually differs.
- *
- * A small blind step-down remains as a last resort if the refined encode still
- * overshoots.
+ *  1. Probe the source at the ceiling resolution to project its full size, then
+ *     solve res = ceiling · √(cap / projected) for a first guess.
+ *  2. Real-encode that guess and Newton-step the resolution onto the cap using
+ *     √(aim / measured). The effort dial (EFFORT_STEPS) bounds how many of these
+ *     real encodes we spend — more passes land the size closer to the limit.
+ *  3. If resolution is pinned at the source ceiling with budget to spare, climb
+ *     gifski quality toward 100 (never fps) to spend the leftover headroom.
+ *  4. If resolution bottoms out (TARGET_MIN_RES) and it still overflows, drop
+ *     quality as a last resort so it at least fits.
  */
 export async function encodeToTarget(cap: number): Promise<ArrayBuffer> {
 	stage.value = "preparing";
 	progress.value = 0;
 	targetOutcome.value = null;
-	const onStep = (message: string) => {
-		statusText.value = message;
+
+	let budget = EFFORT_STEPS[effort.peek()];
+	const ceiling = resolutionCeiling();
+	const base: EncodeSettings = {
+		...settings.peek(),
+		fps: TARGET_FPS,
+		quality: TARGET_QUALITY,
 	};
 
-	// Pass 1 — conservative search + confirming encode.
-	const pick = await searchForTarget(cap * TARGET_SAFETY, 1, onStep);
-	let chosen = pick.settings;
+	// 1 — probe the ceiling and solve for the resolution that should fit the cap.
+	statusText.value = "Finding the best fit…";
+	const ceilingBytes = await projectFull({ ...base, maxSize: ceiling });
+	let res = ceiling;
+	if (ceilingBytes > cap * TARGET_SAFETY && ceilingBytes > 0) {
+		res = Math.round(ceiling * Math.sqrt((cap * TARGET_SAFETY) / ceilingBytes));
+	}
+	res = clamp(res, TARGET_MIN_RES, ceiling);
+
+	// 2 — real-encode the guess, then Newton-step the resolution onto the cap.
+	let chosen: EncodeSettings = { ...base, maxSize: res };
 	settings.value = chosen;
 	let gif = await encodeWith(chosen);
 
-	// Pass 2 — calibrate from the real bytes and re-tune to use the full budget.
-	if (pick.predicted > 0) {
-		const calibration = gif.byteLength / pick.predicted; // measured ÷ projected at `chosen`
-		const refined = await searchForTarget(
-			cap * PASS2_SAFETY,
-			calibration,
-			onStep,
+	const aim = cap * PASS2_SAFETY;
+	while (budget > 0) {
+		const overshoot = gif.byteLength > cap;
+		const undershoot = gif.byteLength < aim && res < ceiling;
+		if (!overshoot && !undershoot) break; // inside the target band — done
+		const next = clamp(
+			Math.round(res * Math.sqrt(aim / gif.byteLength)),
+			TARGET_MIN_RES,
+			ceiling,
 		);
-		if (
-			refined.settings.quality !== chosen.quality ||
-			refined.settings.maxSize !== chosen.maxSize
-		) {
-			chosen = refined.settings;
-			settings.value = chosen;
-			statusText.value = "Maximizing quality…";
-			gif = await encodeWith(chosen);
-		}
-	}
-
-	// Fine-tune against the *real* bytes — the probe model isn't exact and gifski's
-	// quality knob is discrete, so the projected pick often leaves budget unused.
-	let budget = TARGET_TUNE_STEPS; // cap on extra real encodes
-
-	// If pass 2 overshot, step quality down until it fits.
-	while (budget > 0 && gif.byteLength > cap && chosen.quality > QUALITY_FLOOR) {
-		chosen = {
-			...chosen,
-			quality: Math.max(QUALITY_FLOOR, chosen.quality - TARGET_TUNE_QUALITY),
-		};
+		if (next === res) break; // pinned at a bound — nothing more to gain here
+		res = next;
+		chosen = { ...chosen, maxSize: res };
 		settings.value = chosen;
-		statusText.value = "Fitting your size limit…";
+		statusText.value = "Dialing in the size…";
 		gif = await encodeWith(chosen);
 		budget -= 1;
 	}
 
-	// Balanced climb: spend leftover budget on higher gifski quality (fewer palette
-	// artefacts), buying it back with a small, continuous resolution trim when it
-	// overshoots — size scales ~with maxSize², so aim the trim there directly. Never
-	// drop below TARGET_MIN_RES_FRACTION of the chosen resolution; that's the point
-	// where the sharpness loss outweighs the quality gain.
-	const floorRes = Math.round(chosen.maxSize * TARGET_MIN_RES_FRACTION);
-	while (
-		budget > 0 &&
-		chosen.quality < 100 &&
-		gif.byteLength < cap * PASS2_SAFETY
-	) {
-		const q = Math.min(100, chosen.quality + TARGET_TUNE_QUALITY);
-		settings.value = { ...chosen, quality: q };
+	// 3 — resolution pinned at the source ceiling with room to spare: spend the
+	// leftover budget climbing gifski quality (never fps, never a lower quality).
+	while (budget > 0 && res >= ceiling && chosen.quality < 100 && gif.byteLength < aim) {
+		const q = Math.min(100, chosen.quality + 5);
+		const trial: EncodeSettings = { ...chosen, quality: q };
+		settings.value = trial;
 		statusText.value = "Maximizing quality…";
-		let trial = await encodeWith({ ...chosen, quality: q });
+		const trialGif = await encodeWith(trial);
 		budget -= 1;
-
-		if (trial.byteLength <= cap) {
-			chosen = { ...chosen, quality: q }; // fits at full resolution — take it outright
-			gif = trial;
-			continue;
-		}
-
-		// Overshoots: trim resolution to fill the cap at this higher quality.
-		const trimmedRes = Math.round(
-			chosen.maxSize * Math.sqrt((cap * PASS2_SAFETY) / trial.byteLength),
-		);
-		if (trimmedRes < floorRes || budget <= 0) {
-			settings.value = chosen; // too much resolution to give up — keep the last fit
+		if (trialGif.byteLength > cap) {
+			settings.value = chosen; // overshoot — keep the last fit
 			break;
 		}
-		settings.value = { ...chosen, maxSize: trimmedRes, quality: q };
-		statusText.value = "Maximizing quality…";
-		trial = await encodeWith({ ...chosen, maxSize: trimmedRes, quality: q });
-		budget -= 1;
-		if (trial.byteLength > cap) {
-			settings.value = chosen; // estimate came in high — keep the last safe pick
-			break;
-		}
-		chosen = { ...chosen, maxSize: trimmedRes, quality: q };
-		gif = trial;
+		chosen = trial;
+		gif = trialGif;
 	}
-	settings.value = chosen;
 
+	// 4 — resolution bottomed out and it still overflows: drop quality to fit.
+	let rescue = 4;
+	while (rescue > 0 && gif.byteLength > cap && chosen.quality > QUALITY_FLOOR) {
+		const q = Math.max(QUALITY_FLOOR, chosen.quality - 15);
+		chosen = { ...chosen, quality: q };
+		settings.value = chosen;
+		statusText.value = "Fitting your size limit…";
+		gif = await encodeWith(chosen);
+		rescue -= 1;
+	}
+
+	settings.value = chosen;
 	targetOutcome.value = {
 		cap,
 		quality: chosen.quality,
@@ -186,78 +162,18 @@ export async function encodeToTarget(cap: number): Promise<ArrayBuffer> {
 	return gif;
 }
 
-/**
- * Find the largest-resolution / highest-quality settings whose projected size
- * fits under `cap`. Walks the resolution ladder downward only when a rung can't
- * fit even at the quality floor; within the first feasible rung it binary-searches
- * quality. Returns a best-effort (smallest rung, floor quality) result if nothing
- * fits, flagged `fits: false`.
- */
-async function searchForTarget(
-	target: number,
-	calibration: number,
-	onStep: (message: string) => void,
-): Promise<{ settings: EncodeSettings; predicted: number; fits: boolean }> {
-	const base = settings.peek();
-	const project = (rate: number, kind: "video" | "images") =>
-		fullBytesFromRate(rate, kind) * calibration;
-	const ladder = [...new Set([base.maxSize, ...MAXSIZE_LADDER])]
-		.filter((rung) => rung <= base.maxSize)
-		.sort((a, b) => b - a);
+/** Resolution ceiling: the ladder top, but never upscaled past the source's own size. */
+function resolutionCeiling(): number {
+	const src = video.peek();
+	if (src) return Math.min(TARGET_MAX_RES, Math.max(src.width, src.height));
+	return TARGET_MAX_RES; // images: natural size unknown here; contain() caps it for real
+}
 
-	let fallback: { settings: EncodeSettings; predicted: number } | null = null;
-
-	for (const rung of ladder) {
-		onStep("Finding the best fit…");
-		const floor = await probeRateFor({
-			...base,
-			maxSize: rung,
-			quality: QUALITY_FLOOR,
-		});
-		if (!floor) break;
-		const floorBytes = project(floor.rate, floor.kind);
-
-		if (floorBytes > target) {
-			// Even the floor overflows here — remember it (smallest wins) and shrink.
-			fallback = {
-				settings: { ...base, maxSize: rung, quality: QUALITY_FLOOR },
-				predicted: floorBytes,
-			};
-			continue;
-		}
-
-		// This rung fits at some quality — binary-search the highest that stays under.
-		let lo = QUALITY_FLOOR;
-		let hi = 100;
-		let bestQuality = QUALITY_FLOOR;
-		let bestBytes = floorBytes;
-		let step = 0;
-		while (lo <= hi) {
-			const mid = Math.floor((lo + hi) / 2);
-			onStep(BALANCE_MESSAGES[step++ % BALANCE_MESSAGES.length]);
-			const res = await probeRateFor({ ...base, maxSize: rung, quality: mid });
-			const bytes = res ? project(res.rate, res.kind) : Infinity;
-			if (bytes <= target) {
-				bestQuality = mid;
-				bestBytes = bytes;
-				lo = mid + 1;
-			} else {
-				hi = mid - 1;
-			}
-		}
-		return {
-			settings: { ...base, maxSize: rung, quality: bestQuality },
-			predicted: bestBytes,
-			fits: true,
-		};
-	}
-
-	// Nothing fit, even at the smallest rung's floor — deliver the smallest we can.
-	const best = fallback ?? {
-		settings: { ...base, quality: QUALITY_FLOOR },
-		predicted: 0,
-	};
-	return { settings: best.settings, predicted: best.predicted, fits: false };
+/** Probe the given settings and project the burst rate to the whole clip's bytes. */
+async function projectFull(s: EncodeSettings): Promise<number> {
+	const res = await probeRateFor(s);
+	if (!res) return 0;
+	return fullBytesFromRate(res.rate, res.kind);
 }
 
 /**

@@ -44,6 +44,7 @@ import {
 	type BeforeInstallPromptEvent,
 	canEncode,
 	canInstall,
+	effort,
 	estimatedBytes,
 	estimating,
 	errorText,
@@ -52,13 +53,11 @@ import {
 	fitConstraint,
 	fitLimitSeconds,
 	floorRate,
-	fpsFit,
 	hasMedia,
 	imageFiles,
 	installEvent,
 	installOpen,
 	isBusy,
-	MAXSIZE_LADDER,
 	MB,
 	MIN_VIEW_SECONDS,
 	outputSize,
@@ -81,6 +80,8 @@ import {
 	targetBytes,
 	targetMode,
 	targetOutcome,
+	TARGET_FPS,
+	TARGET_MIN_RES,
 	TARGET_PRESETS,
 	trim,
 	video,
@@ -896,6 +897,9 @@ function ZoomButton(props: {
 	);
 }
 
+// Effort chips map to the string enum by position.
+const EFFORT_ORDER = ["fast", "balanced", "best"] as const;
+
 function SettingsCard() {
 	const s = settings.value;
 	const target = targetMode.value;
@@ -905,41 +909,62 @@ function SettingsCard() {
 			<div class="grid gap-4">
 				<ModeToggle target={target} />
 
-				<ChipRow
-					icon={<Film class="size-4 text-sun" />}
-					label="Frame rate"
-					options={[10, 15, 24].map((value) => ({ value, label: `${value}` }))}
-					active={s.fps}
-					onPick={(fps) => updateSettings({ fps })}
-				/>
-
 				{target ? (
-					<TargetSizeRow />
-				) : (
-					<ChipRow
-						icon={<Sparkles class="size-4 text-sun" />}
-						label="Quality"
-						options={[
-							{ value: 70, label: "Good" },
-							{ value: 85, label: "High" },
-							{ value: 95, label: "Max" },
-						]}
-						active={s.quality}
-						onPick={(quality) => updateSettings({ quality })}
-					/>
-				)}
+					<>
+						<TargetSizeRow />
 
-				<ChipRow
-					icon={<Maximize2 class="size-4 text-sun" />}
-					label={target ? "Max res" : "Max size"}
-					options={[
-						{ value: 360, label: "360" },
-						{ value: 480, label: "480" },
-						{ value: 720, label: "720" },
-					]}
-					active={s.maxSize}
-					onPick={(maxSize) => updateSettings({ maxSize })}
-				/>
+						<ChipRow
+							icon={<Gauge class="size-4 text-sun" />}
+							label="Effort"
+							options={[
+								{ value: 0, label: "Fast" },
+								{ value: 1, label: "Balanced" },
+								{ value: 2, label: "Best" },
+							]}
+							active={EFFORT_ORDER.indexOf(effort.value)}
+							onPick={(index) => {
+								effort.value = EFFORT_ORDER[index];
+							}}
+						/>
+					</>
+				) : (
+					<>
+						<ChipRow
+							icon={<Film class="size-4 text-sun" />}
+							label="Frame rate"
+							options={[10, 15, 24].map((value) => ({
+								value,
+								label: `${value}`,
+							}))}
+							active={s.fps}
+							onPick={(fps) => updateSettings({ fps })}
+						/>
+
+						<ChipRow
+							icon={<Sparkles class="size-4 text-sun" />}
+							label="Quality"
+							options={[
+								{ value: 70, label: "Good" },
+								{ value: 85, label: "High" },
+								{ value: 95, label: "Max" },
+							]}
+							active={s.quality}
+							onPick={(quality) => updateSettings({ quality })}
+						/>
+
+						<ChipRow
+							icon={<Maximize2 class="size-4 text-sun" />}
+							label="Max size"
+							options={[
+								{ value: 360, label: "360" },
+								{ value: 480, label: "480" },
+								{ value: 720, label: "720" },
+							]}
+							active={s.maxSize}
+							onPick={(maxSize) => updateSettings({ maxSize })}
+						/>
+					</>
+				)}
 
 				<ChipRow
 					icon={<Repeat class="size-4 text-sun" />}
@@ -957,9 +982,10 @@ function SettingsCard() {
 
 			{target ? (
 				<p class="mt-3 px-1 text-[0.7rem] leading-snug text-star-soft">
-					Finds the highest quality under your cap. If even the lowest quality
-					won&apos;t fit, it steps the resolution down from{" "}
-					<span class="font-bold text-star">Max res</span>.
+					Holds <span class="font-bold text-star">{TARGET_FPS} fps</span> and
+					high quality, shrinking the resolution to fit your cap.{" "}
+					<span class="font-bold text-star">Effort</span> trades speed for
+					landing closer to the limit.
 				</p>
 			) : null}
 		</Panel>
@@ -1239,11 +1265,10 @@ function FeasibilityRow() {
 	const limit = fitLimitSeconds.value;
 	if (!Number.isFinite(limit)) return null;
 
-	const suggestFps = fpsFit.value;
 	const message =
 		fitConstraint.value === "size"
 			? `Too long for ${formatBytes(targetBytes.value)} — fits about ~${limit.toFixed(1)}s`
-			: `Too long at ${settings.value.fps} fps — smooth up to ~${limit.toFixed(1)}s`;
+			: `Too long to keep it smooth — fits about ~${limit.toFixed(1)}s`;
 
 	return (
 		<div class="mb-2 grid gap-2 px-1">
@@ -1260,16 +1285,6 @@ function FeasibilityRow() {
 					<Scissors class="size-3.5" />
 					Trim to ~{limit.toFixed(1)}s
 				</button>
-				{suggestFps ? (
-					<button
-						type="button"
-						onClick={() => updateSettings({ fps: suggestFps })}
-						class="inline-flex min-h-9 items-center gap-1.5 rounded-full border-2 border-sky-line bg-sky-deep/50 px-3.5 text-xs font-bold tracking-wide text-star uppercase transition hover:border-star/40"
-					>
-						<Film class="size-3.5 text-sun" />
-						Use {suggestFps} fps
-					</button>
-				) : null}
 			</div>
 		</div>
 	);
@@ -1543,11 +1558,6 @@ function scheduleProbe() {
 let floorProbeGeneration = 0;
 let floorProbeTimer: ReturnType<typeof setTimeout> | undefined;
 
-/** Smallest resolution rung the search could ever drop to, given the current ceiling. */
-function smallestRung(maxSize: number) {
-	return Math.min(maxSize, MAXSIZE_LADDER[MAXSIZE_LADDER.length - 1]);
-}
-
 /** Measure the bytes/sec floor that powers the feasibility horizon (target mode, video). */
 async function runFloorProbe() {
 	const generation = ++floorProbeGeneration;
@@ -1557,9 +1567,12 @@ async function runFloorProbe() {
 		return;
 	}
 	try {
+		// The most permissive settings the search can reach: fixed fps, smallest
+		// resolution, lowest quality — this is the longest a clip could ever fit.
 		const res = await probeRateFor({
 			...base,
-			maxSize: smallestRung(base.maxSize),
+			fps: TARGET_FPS,
+			maxSize: TARGET_MIN_RES,
 			quality: QUALITY_FLOOR,
 		});
 		if (generation !== floorProbeGeneration) return;
@@ -1602,6 +1615,7 @@ function setTargetMode(on: boolean) {
 	targetMode.value = on;
 	targetOutcome.value = null;
 	if (on) {
+		settings.value = { ...settings.value, fps: TARGET_FPS }; // target mode fixes fps
 		resetEstimate(); // the live estimate gives way to the cap-driven search
 		scheduleFloorProbe();
 	} else if (hasMedia.peek()) {

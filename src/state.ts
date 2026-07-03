@@ -18,17 +18,27 @@ export const PROBE_SECONDS = 1; // contiguous footage encoded to gauge bytes-per
 export const PROBE_IMAGE_FRAMES = 8; // frames encoded to gauge bytes-per-frame for image sources
 export const PROBE_DEBOUNCE_MS = 280; // wait out rapid setting changes before re-probing
 
-// Target-size search (resolution-first): descend these max-dimension rungs only
-// when even the lowest quality won't fit; within a rung, maximize gifski quality.
-export const MAXSIZE_LADDER = [720, 600, 480, 400, 360, 300, 240, 180, 120];
-export const QUALITY_FLOOR = 1; // lowest gifski quality the search will accept
+// Target-size mode holds fps and quality high and fixed, then shrinks resolution
+// (size ∝ resolution²) until the encode fits the cap — see encodeToTarget. Only if
+// the smallest resolution still overflows does quality drop, as a last resort.
+export const TARGET_FPS = 15; // frame rate the target search fixes on (never below this)
+export const TARGET_QUALITY = 90; // gifski quality the search holds; resolution moves instead
+export const TARGET_MAX_RES = 720; // resolution ceiling (also capped to the source's own size)
+export const TARGET_MIN_RES = 120; // smallest resolution before quality is sacrificed
+export const QUALITY_FLOOR = 1; // absolute quality floor (feasibility probe + last-ditch rescue)
 export const TARGET_SAFETY = 0.93; // pass-1 margin: aim under the cap, probe→full carries error
 export const PASS2_SAFETY = 0.98; // pass-2 margin: calibrated, so we can aim much closer
-export const TARGET_TUNE_STEPS = 5; // max real encodes spent fine-tuning quality against the cap
-export const TARGET_TUNE_QUALITY = 4; // quality step per fine-tune climb
-export const TARGET_MIN_RES_FRACTION = 0.85; // don't trade resolution below this share of the chosen max to buy quality
+
+// Effort dial: how many real encodes the search spends dialing resolution onto the
+// cap. More passes land closer to the limit (more resolution kept) but take longer.
+export type Effort = "fast" | "balanced" | "best";
+export const EFFORT_STEPS: Record<Effort, number> = {
+	fast: 1,
+	balanced: 3,
+	best: 6,
+};
+
 export const FIT_HORIZON_SAFETY = 0.95; // margin for the "longest clip that fits" feasibility limit
-export const FPS_GAIN_DISCOUNT = 0.6; // fps→size is sublinear (frame coherence); under-promise the gain
 export const TARGET_PRESETS = [2, 5, 10]; // quick-pick caps, MB
 export const MB = 1000 * 1000; // decimal MB, matching how Finder/iOS report file sizes
 
@@ -63,9 +73,10 @@ export const probeRate = signal<number | null>(null); // bytes/sec for video, by
 export const probeKind = signal<null | "video" | "images">(null);
 export const estimating = signal(false);
 
-// Target-size mode: maximize quality under a byte cap (see runEncode/searchForTarget).
+// Target-size mode: shrink resolution under a byte cap (see runEncode/encodeToTarget).
 export const targetMode = signal(false);
 export const targetBytes = signal<number>(5 * MB);
+export const effort = signal<Effort>("balanced");
 export const targetOutcome = signal<{
 	cap: number;
 	quality: number;
@@ -86,27 +97,19 @@ export const selectionSeconds = computed(() => {
 	return Math.max(0, end - start);
 });
 
-// Longest selection (seconds) that fits both budgets at the given fps. The size
-// term scales with fps but sublinearly (frame coherence), so we discount it.
-export function fitLimitSecondsAt(fps: number): number {
+// Longest selection (seconds) that fits both budgets. Target mode fixes fps at
+// TARGET_FPS, so there's no fps to vary here: the limit is the smaller of the frame
+// budget (MAX_VIDEO_FRAMES / fps) and the size budget (cap ÷ the measured floor rate).
+export const fitLimitSeconds = computed<number>(() => {
 	if (!video.value || !targetMode.value) return Infinity;
-	const frameLimit = MAX_VIDEO_FRAMES / fps;
+	const frameLimit = MAX_VIDEO_FRAMES / TARGET_FPS;
 	const rate = floorRate.value;
-	let sizeLimit = Infinity;
-	if (rate != null && rate > 0) {
-		const current = settings.value.fps;
-		const base = (targetBytes.value * FIT_HORIZON_SAFETY) / rate; // at the current fps
-		sizeLimit =
-			fps === current
-				? base
-				: base * (1 + (current / fps - 1) * FPS_GAIN_DISCOUNT);
-	}
+	const sizeLimit =
+		rate != null && rate > 0
+			? (targetBytes.value * FIT_HORIZON_SAFETY) / rate
+			: Infinity;
 	return Math.min(frameLimit, sizeLimit);
-}
-
-export const fitLimitSeconds = computed(() =>
-	fitLimitSecondsAt(settings.value.fps),
-);
+});
 
 export const selectionFits = computed(
 	() => selectionSeconds.value <= fitLimitSeconds.value,
@@ -115,25 +118,13 @@ export const selectionFits = computed(
 // Which budget is binding when the selection doesn't fit: "frames" or "size".
 export const fitConstraint = computed<null | "frames" | "size">(() => {
 	if (!video.value || selectionFits.value) return null;
-	const frameLimit = MAX_VIDEO_FRAMES / settings.value.fps;
+	const frameLimit = MAX_VIDEO_FRAMES / TARGET_FPS;
 	const rate = floorRate.value;
 	const sizeLimit =
 		targetMode.value && rate
 			? (targetBytes.value * FIT_HORIZON_SAFETY) / rate
 			: Infinity;
 	return sizeLimit < frameLimit ? "size" : "frames";
-});
-
-// Lowest-impact fps (highest that still works) that would make the current
-// selection fit, or null if trimming is the only/also-needed remedy.
-export const fpsFit = computed(() => {
-	if (!video.value || selectionFits.value) return null;
-	const current = settings.value.fps;
-	const need = selectionSeconds.value;
-	for (const fps of [24, 15, 10].filter((f) => f < current)) {
-		if (need <= fitLimitSecondsAt(fps)) return fps;
-	}
-	return null;
 });
 
 export const hasMedia = computed(
