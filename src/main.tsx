@@ -217,7 +217,15 @@ function App() {
 					{hasMedia.value || stage.value === "done" ? (
 						<Workspace />
 					) : (
-						<DropZone />
+						<>
+							<DropZone />
+							<a
+								href="https://gnass.buzz/privacy/"
+								class="self-center text-xs text-star-soft transition hover:text-star"
+							>
+								Privacy
+							</a>
+						</>
 					)}
 				</div>
 				<ActionBar />
